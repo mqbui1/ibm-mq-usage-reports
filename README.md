@@ -33,15 +33,15 @@ The pipeline is five steps, each in its own module:
    reads `metric.name`, `metric.group_by`, and `metric.filters` from the config and
    generates a program string, e.g. for the default config:
    ```
-   data('ibm.mq.message.deq.count').delta().sum(by=['mq.qmgr', 'mq.queue']).publish()
+   data('ibm.mq.message.deq.count').sum(by=['ibm.mq.queue.manager', 'messaging.destination.name']).publish()
    ```
    - `data(...)` selects the raw metric (optionally with a `filter(...)` clause per
      `metric.filters` entry, e.g. to scope to specific queue managers).
-   - `.delta()` converts the cumulative counter into per-interval deltas (the count of
-     messages dequeued *since the previous datapoint*, not the running total).
-   - `.sum(by=[...])` collapses all time series sharing the same `mq.qmgr`/`mq.queue`
-     dimensions into one series per group (in case a queue's metric is reported by
-     multiple sources).
+   - `.delta()` is applied only if `metric.is_cumulative_counter: true` — the default
+     metric is a GAUGE, not a counter (see caveat below), so it's skipped by default.
+   - `.sum(by=[...])` collapses all time series sharing the same
+     `ibm.mq.queue.manager`/`messaging.destination.name` dimensions into one series per
+     group (in case a queue's metric is reported by multiple sources).
 
 3. **Execute the query** — `SignalFlowQuery.run()` in the same file opens a
    `SignalFlowClient` (from
@@ -49,26 +49,52 @@ The pipeline is five steps, each in its own module:
    against `https://stream.<realm>.signalfx.com`, calls `client.execute(program,
    start=start_ms, stop=stop_ms)`, and streams the result:
    - `MetadataMessage`s map each time series ID (`tsid`) to its dimensions (so we can
-     recover `mq.qmgr`/`mq.queue` per series).
-   - `DataMessage`s carry the actual `{tsid: value}` delta datapoints at each
+     recover `ibm.mq.queue.manager`/`messaging.destination.name` per series).
+   - `DataMessage`s carry the actual `{tsid: value}` per-interval datapoints at each
      resolution interval.
    These are joined into a long-format `pandas.DataFrame`: one row per
-   `(mq.qmgr, mq.queue, timestamp_ms, value)`.
+   `(ibm.mq.queue.manager, messaging.destination.name, timestamp_ms, value)`.
 
-4. **Aggregate into totals** — `report_generator/report.py:summarize_totals()` sums
-   the `value` column per `group_by` group across the whole window to get
-   "total messages processed in this period" per queue manager/queue. Any datapoint
-   with `value < 0` (a counter reset — see caveat below) is dropped before summing and
-   the count of dropped points is logged as a warning. Result is a small DataFrame:
-   `mq.qmgr | mq.queue | total_messages_processed`, sorted descending.
+4. **Aggregate** — `report_generator/report.py` turns that per-interval DataFrame into
+   two views:
+   - `clean_negative_deltas()` drops any datapoint with `value < 0` (a counter reset —
+     see caveat below) once, up front, logging how many were dropped.
+   - `summarize_totals()` produces the period-total table: `total_messages_processed`,
+     `avg_per_interval` / `peak_interval_value` (straight from the per-interval values
+     already fetched — no extra query needed), a `pct_of_total` share, and a bolded
+     subtotal row per parent group (e.g. one row per queue manager summing its queues)
+     when `group_by` has more than one dimension.
+   - `summarize_trend()` produces a second table bucketed by `report.trend_granularity`
+     (`hourly`/`daily`/`weekly`/`monthly`) — a trend across the window instead of one
+     endpoint number, e.g. daily bars for a `--period month` report.
 
 5. **Export** — `report_generator/exporters/excel_exporter.py` and `pdf_exporter.py`
-   render that totals DataFrame as a titled table to `.xlsx` (via `openpyxl`) and/or
-   `.pdf` (via `reportlab`), written to `report.output_dir` as
-   `<title>_<period-label>.xlsx`/`.pdf`.
+   render the totals table (with a metadata header: period, metric name, realm,
+   generation timestamp, inferred data resolution) plus the trend table as a second
+   sheet (Excel) or page (PDF, landscape orientation so the wider table fits), written
+   to `report.output_dir` as `<title>_<period-label>.xlsx`/`.pdf`. Column names are
+   relabeled to friendlier headers (`report_generator/exporters/format_utils.py`) and
+   numeric columns rounded for readability — the underlying totals/trend DataFrames
+   used for the actual numbers are untouched.
 
-`generate_report.py` wires these five steps together in order: resolve period → build
-program → run query → summarize → export.
+`generate_report.py` wires these steps together in order: resolve period → build
+program → run query → clean → summarize totals + trend → export.
+
+### Report columns
+
+| Column | Meaning |
+|---|---|
+| Queue Manager / Queue | `group_by` dimensions (`ibm.mq.queue.manager` / `messaging.destination.name`) |
+| Total Messages | `total_messages_processed` — sum of all per-interval values across the whole period |
+| Avg / Interval | mean per-interval value (label includes the inferred resolution, e.g. "~5 min") |
+| Peak / Interval | max single per-interval value seen during the period |
+| % of Total | this row's share of the grand total for the period |
+| *(subtotal row)* | one bolded row per queue manager, summing that manager's queues |
+
+The **Trend** sheet/page buckets the same data by `report.trend_granularity` instead of
+collapsing it to one number — set this in `config.yaml` based on the period length, e.g.
+`"daily"` for `--period month`, `"weekly"` for `--period quarter`, `"monthly"` for
+`--period year` (keeps the trend table readable instead of ~365 daily rows).
 
 ## Setup
 
@@ -105,6 +131,36 @@ Run as a monthly/quarterly cron job to build up a report archive, e.g.:
 # Run on the 2nd of each month, generating last month's report
 0 6 2 * * cd /path/to/ibm-mq-usage-reports && SFX_API_TOKEN=... python generate_report.py --period month >> /var/log/mq-report.log 2>&1
 ```
+
+## Recommended process for a full-year report request
+
+If a customer asks for a trailing 12 months (or any window longer than the org's
+retention — see "Known limitations" below), **don't promise a real year of history from
+a single query today** — check `GET /v2/organization`'s `features` list for the org's
+actual retention entitlement first; this tool cannot return data the platform no longer
+retains.
+
+Recommended process instead:
+
+1. **Set expectations immediately**: state the org's actual high-res retention window
+   (e.g. ~96 days) so the customer knows any "last 12 months" report today can only
+   cover what's still in that window, not the full year.
+2. **Start archiving now, monthly**: schedule `generate_report.py --period month` on a
+   recurring monthly cron (see "Scheduling" above). A `--period quarter`/`--period year`
+   report is just three/twelve of those monthly totals combined — you don't need
+   separate quarterly/yearly cron jobs, just enough months archived to combine later
+   (and you can still run `--period quarter`/`--period year` on demand for whatever
+   *is* still within the platform's retention).
+3. **Store the exports outside this repo**: `reports/` is gitignored on purpose —
+   generated `.xlsx`/`.pdf` files are data exports, not source, and shouldn't be
+   committed. Point the cron job's output at wherever the customer already archives
+   this kind of BMC-replacement report (shared drive, S3/blob bucket, ticket
+   attachment), e.g. by writing to a dated subfolder and syncing it out
+   (`aws s3 sync`/`rclone`/etc.) as a step after `generate_report.py` runs.
+4. After ~12 months of monthly archives have accumulated, a genuine trailing-12-month
+   view becomes possible by combining those files — it's a real historical archive
+   built forward from today, not a backfill (which is impossible once data has aged out
+   of the platform).
 
 ## Dashboard option
 

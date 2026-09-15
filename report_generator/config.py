@@ -54,6 +54,10 @@ class ReportConfig:
     output_dir: str = "./reports"
     formats: List[str] = field(default_factory=lambda: ["xlsx", "pdf"])
     title: str = "IBM MQ Message Throughput Report"
+    # Granularity of the trend breakdown sheet/table: "hourly", "daily",
+    # "weekly", or "monthly". Pick something coarse enough not to produce an
+    # unwieldy table for the period length (e.g. "monthly" for --period year).
+    trend_granularity: str = "daily"
 
 
 @dataclass
@@ -97,6 +101,7 @@ def load_config(path: str = "config.yaml") -> Config:
         output_dir=report_raw.get("output_dir", "./reports"),
         formats=report_raw.get("formats", ["xlsx", "pdf"]),
         title=report_raw.get("title", "IBM MQ Message Throughput Report"),
+        trend_granularity=report_raw.get("trend_granularity", "daily"),
     )
 
     dashboard_raw = raw.get("dashboard", {})

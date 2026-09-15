@@ -27,6 +27,10 @@ report:
   output_dir: "./reports"
   formats: ["xlsx", "pdf"]
   title: "IBM MQ Message Throughput Report"
+  # Granularity of the trend breakdown: hourly/daily/weekly/monthly.
+  # Pick something coarse enough not to produce an unwieldy table for the
+  # period length (e.g. "monthly" for --period year).
+  trend_granularity: "daily"
 
 dashboard:
   group_name: "IBM MQ Usage Reports"
