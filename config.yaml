@@ -6,16 +6,29 @@ splunk_observability:
   api_token: "${SFX_API_TOKEN}"    # org or user API access token with metrics read scope
 
 metric:
-  name: "ibm.mq.message.deq.count"   # cumulative dequeue counter (requires MQ queue statistics enabled)
+  name: "ibm.mq.message.deq.count"   # dequeue count (requires MQ queue statistics enabled)
+  # false because the OTel ibm-mq-metrics receiver populates this via IBM MQ's
+  # RESET QSTATS PCF command, which resets the counter on every read — so each
+  # datapoint is already "messages dequeued since the last reset", not a
+  # running cumulative total. Sum the raw values directly; do not delta() them.
+  # See README "Metric type caveat" if you're on a different collector version
+  # and Metric Finder shows this metric's Type as COUNTER instead of GAUGE.
+  is_cumulative_counter: false
   group_by:
-    - "mq.qmgr"
-    - "mq.queue"
+    # Per open-telemetry/opentelemetry-java-contrib ibm-mq-metrics docs.
+    - "ibm.mq.queue.manager"
+    - "messaging.destination.name"
   filters:
     # Optional: restrict to specific queue managers. Empty = all.
-    mq.qmgr: []
-    # mq.qmgr: ["MQU1"]
+    ibm.mq.queue.manager: []
+    # ibm.mq.queue.manager: ["MQU1"]
 
 report:
   output_dir: "./reports"
   formats: ["xlsx", "pdf"]
   title: "IBM MQ Message Throughput Report"
+
+dashboard:
+  group_name: "IBM MQ Usage Reports"
+  dashboard_name: "IBM MQ Message Throughput"
+  chart_name: "Messages Dequeued by Queue Manager / Queue"

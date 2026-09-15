@@ -11,16 +11,24 @@ logger = logging.getLogger(__name__)
 
 def build_program(metric: MetricConfig) -> str:
     """
-    Builds a SignalFlow program that converts the cumulative counter metric
-    into per-interval deltas, grouped by the configured dimensions.
+    Builds a SignalFlow program grouped by the configured dimensions.
 
-    NOTE: this assumes metric.name is a monotonically increasing counter
-    (e.g. ibm.mq.message.deq.count, per Antoine — requires MQ queue
-    statistics to be enabled). delta() will emit a large negative value
-    across a counter reset (collector restart, queue manager bounce).
-    summarize_totals() in report.py drops negative deltas rather than
-    summing them, but that means totals can undercount across a reset —
-    validate against a known-good period before trusting these numbers.
+    If metric.is_cumulative_counter is True (default), assumes metric.name is
+    a monotonically increasing counter (e.g. ibm.mq.message.deq.count, per
+    Antoine — requires MQ queue statistics to be enabled) and applies
+    .delta() to convert it into per-interval deltas before summing. delta()
+    will emit a large negative value across a counter reset (collector
+    restart, queue manager bounce); summarize_totals() in report.py drops
+    negative deltas rather than summing them, but that means totals can
+    undercount across a reset.
+
+    If metric.is_cumulative_counter is False — e.g. Metric Finder shows the
+    metric's Type as GAUGE rather than COUNTER — each datapoint is assumed to
+    already be a per-interval value, so .delta() is skipped (applying it to
+    an already-per-interval gauge would compute the difference between
+    consecutive interval counts, not the count itself, and would badly
+    undercount). Verify against a known-good period before trusting either
+    setting — see README "Metric type caveat".
     """
     filter_clauses = []
     for dim, values in metric.filters.items():
@@ -34,8 +42,11 @@ def build_program(metric: MetricConfig) -> str:
         data_call += f", filter={' and '.join(filter_clauses)}"
     data_call += ")"
 
+    if metric.is_cumulative_counter:
+        data_call += ".delta()"
+
     group_by_list = "[" + ", ".join(f"'{g}'" for g in metric.group_by) + "]"
-    return f"{data_call}.delta().sum(by={group_by_list}).publish()"
+    return f"{data_call}.sum(by={group_by_list}).publish()"
 
 
 class SignalFlowQuery:
