@@ -12,10 +12,12 @@ report feature (it's dashboard-based):
    time-range picker instead of a generated file. See "Dashboard option" below for what
    this can and can't show.
 
-**Status: field-built, account-specific tool — not an officially supported Splunk/Cisco
-integration.** Built to answer a specific TIAA ask (BMC-style historical "messages
-processed by queue" reporting) after confirming with product (Antoine) that Splunk O11y
-doesn't have a native reporting feature equivalent to BMC's.
+**Status:** this tool was built by your Splunk account team to meet a specific reporting
+need — a BMC-style historical "messages processed by queue" report — and is **not an
+officially supported Splunk product feature**. Splunk Observability Cloud's own
+dashboards are the supported way to view this data; this tool exists specifically to
+produce a fixed, exportable total for a completed period, which dashboards don't provide
+natively.
 
 ## How it works
 
@@ -132,35 +134,62 @@ Run as a monthly/quarterly cron job to build up a report archive, e.g.:
 0 6 2 * * cd /path/to/ibm-mq-usage-reports && SFX_API_TOKEN=... python generate_report.py --period month >> /var/log/mq-report.log 2>&1
 ```
 
-## Recommended process for a full-year report request
+## Recommended process for a full-year report
 
-If a customer asks for a trailing 12 months (or any window longer than the org's
-retention — see "Known limitations" below), **don't promise a real year of history from
-a single query today** — check `GET /v2/organization`'s `features` list for the org's
-actual retention entitlement first; this tool cannot return data the platform no longer
-retains.
+If you need a trailing 12 months of history (or any window longer than your org's
+metric retention — see "Known limitations" below), **a single query today cannot
+return a full year of real history** if your retention window is shorter than that —
+check with your Splunk account team (or query `GET /v2/organization`'s `features`
+list) to confirm your org's actual retention entitlement before planning around a
+`--period year` report.
 
-Recommended process instead:
+Recommended process:
 
-1. **Set expectations immediately**: state the org's actual high-res retention window
-   (e.g. ~96 days) so the customer knows any "last 12 months" report today can only
-   cover what's still in that window, not the full year.
-2. **Start archiving now, monthly**: schedule `generate_report.py --period month` on a
-   recurring monthly cron (see "Scheduling" above). A `--period quarter`/`--period year`
-   report is just three/twelve of those monthly totals combined — you don't need
-   separate quarterly/yearly cron jobs, just enough months archived to combine later
-   (and you can still run `--period quarter`/`--period year` on demand for whatever
-   *is* still within the platform's retention).
-3. **Store the exports outside this repo**: `reports/` is gitignored on purpose —
-   generated `.xlsx`/`.pdf` files are data exports, not source, and shouldn't be
-   committed. Point the cron job's output at wherever the customer already archives
-   this kind of BMC-replacement report (shared drive, S3/blob bucket, ticket
-   attachment), e.g. by writing to a dated subfolder and syncing it out
-   (`aws s3 sync`/`rclone`/etc.) as a step after `generate_report.py` runs.
-4. After ~12 months of monthly archives have accumulated, a genuine trailing-12-month
-   view becomes possible by combining those files — it's a real historical archive
-   built forward from today, not a backfill (which is impossible once data has aged out
-   of the platform).
+1. **Confirm the retention window first**, so expectations are set accurately — a
+   "last 12 months" report today can only cover whatever is still inside that window,
+   not necessarily the full year.
+2. **Start archiving monthly, going forward**: schedule `generate_report.py --period
+   month` on a recurring monthly cron (see "Scheduling" above). A `--period
+   quarter`/`--period year` report is just three/twelve of those monthly totals
+   combined, so a single monthly cron job is enough — you don't need separate
+   quarterly/yearly jobs. You can still run `--period quarter`/`--period year` on
+   demand for whatever *is* still within your org's retention.
+3. **Know what's actually being archived** — see "What gets archived" below. This is
+   a computed summary, not a raw-data backup, which affects what you can and can't
+   reconstruct from it later.
+4. **Store the exported files outside this repository**: `reports/` is gitignored on
+   purpose — generated `.xlsx`/`.pdf` files are report output, not source code, and
+   shouldn't be committed here. Point the monthly cron job's output at wherever your
+   organization already retains this kind of report today (shared drive, cloud
+   storage bucket, ticketing system attachment), e.g. by writing to a dated subfolder
+   and syncing it out as a step after `generate_report.py` runs.
+5. After roughly 12 months of monthly archives have accumulated, a genuine
+   trailing-12-month view becomes possible by combining those files. This is a real
+   historical archive built forward from today — it cannot backfill data that has
+   already aged out of the platform.
+
+### What gets archived
+
+Each monthly run produces a report file — not a copy of the raw underlying metric
+data. Specifically:
+
+- **Dimensions retained**: whichever fields `metric.group_by` is set to (by default:
+  queue manager and queue name only — no host, queue type, or other attributes unless
+  added to `group_by`).
+- **Summary numbers retained**: total messages processed, average and peak per-interval
+  values, percent of total, and a per-queue-manager subtotal — all computed for the
+  full period at the time the report runs.
+- **Trend numbers retained**: a rollup at whatever `report.trend_granularity` is set to
+  (daily/weekly/monthly) — e.g. one row per day per queue, not one row per raw
+  measurement interval.
+- **Not retained, at all**: the individual raw per-interval datapoints/timestamps
+  behind those numbers, or any SignalFlow-internal identifiers.
+
+In practice, this means the archive is a **computed summary snapshot**, not a
+full-fidelity backup. Once the underlying data ages out of your org's retention
+window, you cannot go back and regenerate a report at finer granularity than whatever
+the Trend table captured at the time — e.g. if it archived daily totals, hourly totals
+for that month can never be reconstructed afterward.
 
 ## Dashboard option
 
@@ -181,11 +210,11 @@ interval, per queue manager/queue) that you can zoom with O11y's own time-range 
 file to generate. What it does **not** give you is a single hard "total messages
 processed" number for an exact calendar period the way `generate_report.py` does —
 reading a period total off a chart means summing bars visually, or using the chart's
-own List/table rollup option in the O11y UI. If the customer needs an exact,
-export-ready number (e.g. for a report they forward outside the platform), that's still
-`generate_report.py`; if they just want to explore trends interactively, the dashboard
+own List/table rollup option in the O11y UI. If you need an exact, export-ready number
+(e.g. for a report you forward outside the platform), that's still
+`generate_report.py`; if you just want to explore trends interactively, the dashboard
 is the lighter-weight option. Both use the same underlying SignalFlow program, so
-whichever direction is decided later doesn't require re-deriving the metric math.
+whichever direction you choose later doesn't require re-deriving the metric math.
 
 ## Metric type caveat: `ibm.mq.message.deq.count` is a GAUGE, not a counter
 
@@ -220,13 +249,13 @@ at the cost of undercounting across any reset during the window.
 is shared across *any* client that queries it, not just this collector. If another
 monitoring tool (BMC, a second OTel collector instance, manual MQSC) also issues
 `RESET QSTATS`/`MQSC RESET QSTATS` against the same queue on the same queue manager,
-the count gets split between whichever tool reads it first each interval — worth
-confirming with the customer that this collector is the only thing resetting these
-stats on z/OS.
+the count gets split between whichever tool reads it first each interval — confirm
+within your organization that this collector is the only thing resetting these stats
+on z/OS before relying on these totals.
 
 Either way, **validate totals against a known-stable period before treating these
-numbers as authoritative**, and flag this limitation if presenting the numbers
-externally.
+numbers as authoritative**, and flag this limitation if sharing the numbers outside
+your team.
 
 ## Known limitations
 
@@ -250,13 +279,10 @@ externally.
 - The dashboard chart's default time range (30 days) and layout are minimal — treat
   `create_dashboard.py`'s output as a starting point to adjust in the O11y UI, not a
   finished/curated dashboard.
-- **SignalFlow historical jobs can hang if `stop` is too close to real time.** If a
-  query's `stop_ms` lands within the last few minutes, the backend may not have fully
-  materialized/finalized that window yet, and `computation.stream()` never emits
-  completion — it just stalls indefinitely (confirmed by testing: identical query with
-  `stop` 1 hour in the past returned in <1s; with `stop` 5 minutes in the past, it
-  stalled every time regardless of resolution or `.sum(by=[...])` grouping). This does
-  **not** affect `generate_report.py` — `periods.py:resolve_period()` always computes
-  `stop` as the start of the *current* calendar period, which is inherently well in the
-  past. It only bit an ad-hoc validation script that queried up to "now minus 5
-  minutes." Worth knowing if you ever query near-real-time windows directly.
+- **SignalFlow queries can stall if the window's end time is too close to real time**
+  (confirmed by testing — a window ending 5 minutes ago repeatedly stalled, the same
+  query with an end time 1 hour in the past returned in under a second). This does
+  **not** affect normal use of `generate_report.py`: `resolve_period()` always
+  computes the reporting window as a *complete* past calendar period, which is
+  inherently well clear of real time. It only matters if you write a custom query
+  against a very recent time window directly.
