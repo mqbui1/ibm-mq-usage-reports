@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+reports/
+my-config.yaml
+*.xlsx
+*.pdf

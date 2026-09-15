@@ -1,0 +1,21 @@
+# IBM MQ Usage Report Generator — Configuration
+# API token should always be passed via env var, never committed here.
+
+splunk_observability:
+  realm: "us1"                     # e.g. us0, us1, eu0 — determines stream.<realm>.signalfx.com
+  api_token: "${SFX_API_TOKEN}"    # org or user API access token with metrics read scope
+
+metric:
+  name: "ibm.mq.message.deq.count"   # cumulative dequeue counter (requires MQ queue statistics enabled)
+  group_by:
+    - "mq.qmgr"
+    - "mq.queue"
+  filters:
+    # Optional: restrict to specific queue managers. Empty = all.
+    mq.qmgr: []
+    # mq.qmgr: ["MQU1"]
+
+report:
+  output_dir: "./reports"
+  formats: ["xlsx", "pdf"]
+  title: "IBM MQ Message Throughput Report"
